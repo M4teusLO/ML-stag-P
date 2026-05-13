@@ -1,6 +1,5 @@
 """Baixa imagens e vídeos para a pasta de mídias e devolve o caminho local + metadados."""
 import base64
-import json
 import os
 import re
 import subprocess
@@ -28,6 +27,15 @@ _PLACEHOLDER_PREFIXES = (
 def is_placeholder(url: str) -> bool:
     """Retorna True se a URL for um placeholder de lazy-load sem valor real."""
     return url.startswith(_PLACEHOLDER_PREFIXES)
+
+
+def is_hls_url(url: str) -> bool:
+    """Retorna True se a URL for um stream HLS (.m3u8) — vídeo nativo do ML."""
+    return isinstance(url, str) and (
+        url.endswith(".m3u8")
+        or ".m3u8?" in url
+        or "mms.mlstatic.com" in url
+    )
 
 
 def _safe_filename(url: str, fallback_idx: int) -> str:
@@ -60,7 +68,10 @@ def _ensure_extension(filename: str, content_type: str | None) -> str:
 
 
 def _handle_data_url(url: str, dest_dir: Path, index: int) -> dict:
-    """Decodifica e salva imagens embutidas em data: URLs (base64)."""
+    """
+    Decodifica e salva imagens embutidas em data: URLs (base64).
+    Formato esperado: data:[<mime>][;base64],<dados>
+    """
     match = re.match(r"data:(?P<mime>[^;,]+)(?:;base64)?,(?P<data>.+)", url, re.DOTALL)
     if not match:
         raise ValueError(f"data: URL inválida ou não suportada: {url[:80]}")
@@ -97,9 +108,11 @@ def _handle_data_url(url: str, dest_dir: Path, index: int) -> dict:
 def download_image(url: str, dest_dir: Path, index: int) -> dict:
     """Baixa uma imagem e retorna metadados (path, size, dimensões)."""
 
+    # Rejeita placeholders de lazy-load antes de qualquer I/O
     if is_placeholder(url):
         raise ValueError(f"URL é um placeholder de lazy-load, ignorado: {url[:80]}")
 
+    # Trata imagens base64 embutidas (data: URLs reais)
     if url.startswith("data:"):
         logger.info("data: URL detectada no índice %d — decodificando localmente.", index)
         return _handle_data_url(url, dest_dir, index)
@@ -140,91 +153,89 @@ def download_image(url: str, dest_dir: Path, index: int) -> dict:
     }
 
 
-def _probe_video_dimensions(file_path: Path) -> tuple[int | None, int | None]:
-    """Usa ffprobe para extrair largura/altura do vídeo."""
+def download_ml_video(url: str, dest_dir: Path, index: int) -> dict:
+    """
+    Baixa um vídeo nativo do ML via HLS (.m3u8) usando ffmpeg.
+
+    O ffmpeg lida nativamente com playlists HLS: baixa todos os segmentos .ts,
+    demux/remux e entrega um único .mp4 sem re-encoding (codec copy).
+
+    Raises:
+        RuntimeError: se o ffmpeg não estiver instalado ou retornar erro.
+        FileNotFoundError: se o arquivo de saída não for criado.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out_path = dest_dir / f"{index:03d}_video.mp4"
+
+    user_agent = os.getenv(
+        "USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",                          # sobrescreve se já existe
+        "-user_agent", user_agent,
+        "-headers", "Referer: https://www.mercadolivre.com.br/\r\n",
+        "-i", url,
+        "-c", "copy",                  # sem re-encoding — copia os streams como estão
+        "-movflags", "+faststart",     # move o índice pro início (streaming-friendly)
+        "-bsf:a", "aac_adtstoasc",    # corrige áudio AAC encapsulado em ADTS → MPEG-4
+        str(out_path),
+    ]
+
+    logger.info("Baixando vídeo ML HLS: %s -> %s", url[:80], out_path)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minutos — vídeos grandes podem demorar
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg não encontrado. Verifique se está instalado no container."
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg excedeu o timeout (300s) baixando {url[:80]}")
+
+    if result.returncode != 0:
+        # Log do stderr do ffmpeg para debug
+        logger.error("ffmpeg stderr:\n%s", result.stderr[-2000:])
+        raise RuntimeError(
+            f"ffmpeg retornou código {result.returncode} para {url[:80]}"
+        )
+
+    if not out_path.exists():
+        raise FileNotFoundError(f"ffmpeg concluiu mas o arquivo não foi criado: {out_path}")
+
+    file_size = out_path.stat().st_size
+    logger.info("Vídeo baixado com sucesso: %s (%.1f MB)", out_path.name, file_size / 1_048_576)
+
+    # Tenta extrair duração e resolução do ffprobe (instalado junto com ffmpeg)
+    width = height = None
     try:
         probe = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
-                "-print_format", "json",
-                "-show_streams",
-                str(file_path),
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+                str(out_path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=30,
+            capture_output=True, text=True, timeout=15,
         )
-        if probe.returncode == 0:
-            streams = json.loads(probe.stdout).get("streams", [])
-            for s in streams:
-                if s.get("codec_type") == "video":
-                    return s.get("width"), s.get("height")
+        if probe.returncode == 0 and probe.stdout.strip():
+            parts = probe.stdout.strip().split(",")
+            if len(parts) >= 2:
+                width, height = int(parts[0]), int(parts[1])
     except Exception as e:
-        logger.warning("ffprobe falhou em %s: %s", file_path, e)
-    return None, None
-
-
-def download_video(url: str, dest_dir: Path, index: int) -> dict:
-    """
-    Baixa um vídeo usando yt-dlp.
-    Funciona para YouTube, MP4 direto, HLS (.m3u8) e outros formatos.
-    Qualidade máxima: 720p para equilibrar tamanho e fidelidade.
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    # Template de saída: ex 007_video_dQw4w9WgXcQ.mp4
-    out_template = str(dest_dir / f"{index:03d}_video_%(id)s.%(ext)s")
-
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        # Prefere mp4 até 720p; se não houver mp4, aceita qualquer container até 720p
-        "-f", (
-            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-            "/best[height<=720][ext=mp4]"
-            "/best[height<=720]"
-            "/best"
-        ),
-        "--merge-output-format", "mp4",
-        # Não mostrar barra de progresso (saída limpa nos logs)
-        "--no-progress",
-        "--quiet",
-        "--print", "after_move:filepath",   # imprime o caminho final do arquivo
-        "-o", out_template,
-        url,
-    ]
-
-    logger.info("yt-dlp iniciando download: %s", url)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("yt-dlp ultrapassou o tempo limite de 5 minutos")
-
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "erro desconhecido").strip()
-        raise RuntimeError(f"yt-dlp falhou (código {result.returncode}): {err[:600]}")
-
-    # Resolve o caminho do arquivo baixado
-    printed_path = result.stdout.strip()
-    if printed_path and Path(printed_path).exists():
-        file_path = Path(printed_path)
-    else:
-        # Fallback: busca o arquivo mais recente que bate com o padrão
-        candidates = sorted(dest_dir.glob(f"{index:03d}_video_*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not candidates:
-            raise RuntimeError(
-                f"yt-dlp terminou sem erro mas o arquivo não foi encontrado em {dest_dir}. "
-                f"Saída: {result.stdout[:200]}"
-            )
-        file_path = candidates[0]
-
-    file_size = file_path.stat().st_size
-    width, height = _probe_video_dimensions(file_path)
-
-    logger.info("Vídeo baixado: %s (%.1f MB)", file_path.name, file_size / 1_048_576)
+        logger.debug("ffprobe falhou (não crítico): %s", e)
 
     return {
-        "local_path": str(file_path.relative_to(MEDIA_DIR)),
+        "local_path": str(out_path.relative_to(MEDIA_DIR)),
         "file_size": file_size,
         "width": width,
         "height": height,
@@ -232,14 +243,13 @@ def download_video(url: str, dest_dir: Path, index: int) -> dict:
 
 
 def download_youtube_thumbnail(video_id: str, dest_dir: Path, index: int) -> dict | None:
-    """
-    Fallback: baixa só a thumbnail do YouTube quando o download do vídeo falha.
-    """
+    """Para vídeo do YouTube, baixa só a thumbnail (vídeo em si fica linkado)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     thumb_url = f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
     try:
         return download_image(thumb_url, dest_dir, index)
     except Exception:
+        # Fallback pra hqdefault que sempre existe
         try:
             return download_image(
                 f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
