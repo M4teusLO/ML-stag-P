@@ -1,21 +1,22 @@
-FROM python:3.12-slim
+# Imagem oficial do Playwright já vem com Chromium + dependências
+FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 WORKDIR /app
 
-# Dependências do sistema (Pillow precisa de libjpeg/zlib; curl pra healthcheck)
+# Dependências do sistema extras (libjpeg pro Pillow)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libjpeg-dev \
     zlib1g-dev \
-    curl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Garante que os browsers do Playwright estão presentes (já vêm na imagem, mas reforçamos)
+RUN playwright install chromium
+
 COPY app ./app
 
-# Cria diretório de mídias caso ainda não exista
 RUN mkdir -p /data/media
 
 EXPOSE 8000
