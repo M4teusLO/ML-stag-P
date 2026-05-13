@@ -1,7 +1,9 @@
 """Baixa imagens e vídeos para a pasta de mídias e devolve o caminho local + metadados."""
 import base64
+import json
 import os
 import re
+import subprocess
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -58,10 +60,7 @@ def _ensure_extension(filename: str, content_type: str | None) -> str:
 
 
 def _handle_data_url(url: str, dest_dir: Path, index: int) -> dict:
-    """
-    Decodifica e salva imagens embutidas em data: URLs (base64).
-    Formato esperado: data:[<mime>][;base64],<dados>
-    """
+    """Decodifica e salva imagens embutidas em data: URLs (base64)."""
     match = re.match(r"data:(?P<mime>[^;,]+)(?:;base64)?,(?P<data>.+)", url, re.DOTALL)
     if not match:
         raise ValueError(f"data: URL inválida ou não suportada: {url[:80]}")
@@ -98,11 +97,9 @@ def _handle_data_url(url: str, dest_dir: Path, index: int) -> dict:
 def download_image(url: str, dest_dir: Path, index: int) -> dict:
     """Baixa uma imagem e retorna metadados (path, size, dimensões)."""
 
-    # Rejeita placeholders de lazy-load antes de qualquer I/O
     if is_placeholder(url):
         raise ValueError(f"URL é um placeholder de lazy-load, ignorado: {url[:80]}")
 
-    # Trata imagens base64 embutidas (data: URLs reais)
     if url.startswith("data:"):
         logger.info("data: URL detectada no índice %d — decodificando localmente.", index)
         return _handle_data_url(url, dest_dir, index)
@@ -143,14 +140,106 @@ def download_image(url: str, dest_dir: Path, index: int) -> dict:
     }
 
 
+def _probe_video_dimensions(file_path: Path) -> tuple[int | None, int | None]:
+    """Usa ffprobe para extrair largura/altura do vídeo."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if probe.returncode == 0:
+            streams = json.loads(probe.stdout).get("streams", [])
+            for s in streams:
+                if s.get("codec_type") == "video":
+                    return s.get("width"), s.get("height")
+    except Exception as e:
+        logger.warning("ffprobe falhou em %s: %s", file_path, e)
+    return None, None
+
+
+def download_video(url: str, dest_dir: Path, index: int) -> dict:
+    """
+    Baixa um vídeo usando yt-dlp.
+    Funciona para YouTube, MP4 direto, HLS (.m3u8) e outros formatos.
+    Qualidade máxima: 720p para equilibrar tamanho e fidelidade.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Template de saída: ex 007_video_dQw4w9WgXcQ.mp4
+    out_template = str(dest_dir / f"{index:03d}_video_%(id)s.%(ext)s")
+
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        # Prefere mp4 até 720p; se não houver mp4, aceita qualquer container até 720p
+        "-f", (
+            "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
+            "/best[height<=720][ext=mp4]"
+            "/best[height<=720]"
+            "/best"
+        ),
+        "--merge-output-format", "mp4",
+        # Não mostrar barra de progresso (saída limpa nos logs)
+        "--no-progress",
+        "--quiet",
+        "--print", "after_move:filepath",   # imprime o caminho final do arquivo
+        "-o", out_template,
+        url,
+    ]
+
+    logger.info("yt-dlp iniciando download: %s", url)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("yt-dlp ultrapassou o tempo limite de 5 minutos")
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "erro desconhecido").strip()
+        raise RuntimeError(f"yt-dlp falhou (código {result.returncode}): {err[:600]}")
+
+    # Resolve o caminho do arquivo baixado
+    printed_path = result.stdout.strip()
+    if printed_path and Path(printed_path).exists():
+        file_path = Path(printed_path)
+    else:
+        # Fallback: busca o arquivo mais recente que bate com o padrão
+        candidates = sorted(dest_dir.glob(f"{index:03d}_video_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            raise RuntimeError(
+                f"yt-dlp terminou sem erro mas o arquivo não foi encontrado em {dest_dir}. "
+                f"Saída: {result.stdout[:200]}"
+            )
+        file_path = candidates[0]
+
+    file_size = file_path.stat().st_size
+    width, height = _probe_video_dimensions(file_path)
+
+    logger.info("Vídeo baixado: %s (%.1f MB)", file_path.name, file_size / 1_048_576)
+
+    return {
+        "local_path": str(file_path.relative_to(MEDIA_DIR)),
+        "file_size": file_size,
+        "width": width,
+        "height": height,
+    }
+
+
 def download_youtube_thumbnail(video_id: str, dest_dir: Path, index: int) -> dict | None:
-    """Para vídeo do YouTube, baixa só a thumbnail (vídeo em si fica linkado)."""
+    """
+    Fallback: baixa só a thumbnail do YouTube quando o download do vídeo falha.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     thumb_url = f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"
     try:
         return download_image(thumb_url, dest_dir, index)
     except Exception:
-        # Fallback pra hqdefault que sempre existe
         try:
             return download_image(
                 f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",

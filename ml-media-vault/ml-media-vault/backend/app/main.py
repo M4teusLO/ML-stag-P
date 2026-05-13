@@ -21,7 +21,6 @@ from . import scraper, downloader
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Cria as tabelas no boot. (Para produção use Alembic; aqui é simples.)
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ML Media Vault", description="Cofre de mídias dos seus anúncios do Mercado Livre")
@@ -49,6 +48,49 @@ def _get_or_create_store(db: Session, name: str | None, seller_nickname: str | N
     db.commit()
     db.refresh(store)
     return store
+
+
+def _download_video_with_fallback(
+    v: dict,
+    dest: Path,
+    idx: int,
+    media: Media,
+) -> None:
+    """
+    Tenta baixar o vídeo de verdade via yt-dlp.
+    Para YouTube: se falhar, cai para thumbnail.
+    Para vídeo nativo: se falhar, registra erro sem thumbnail.
+    """
+    mtype = v.get("type", "video")
+    video_url = v["url"]
+
+    try:
+        meta = downloader.download_video(video_url, dest, idx)
+        media.local_path = meta["local_path"]
+        media.file_size = meta["file_size"]
+        media.width = meta["width"]
+        media.height = meta["height"]
+        media.downloaded_at = datetime.utcnow()
+        logger.info("Vídeo baixado OK: %s", media.local_path)
+
+    except Exception as e:
+        logger.error("Falha ao baixar vídeo %s — %s", video_url[:80], e)
+        media.download_error = str(e)
+
+        # Para YouTube: ao menos salva a thumbnail como fallback
+        if mtype == "youtube" and v.get("id"):
+            logger.info("Tentando fallback de thumbnail para YouTube %s", v["id"])
+            try:
+                meta = downloader.download_youtube_thumbnail(v["id"], dest, idx)
+                if meta:
+                    media.local_path = meta["local_path"]
+                    media.file_size = meta["file_size"]
+                    media.width = meta["width"]
+                    media.height = meta["height"]
+                    media.downloaded_at = datetime.utcnow()
+                    # Mantém download_error para sinalizar que é só thumb
+            except Exception as te:
+                logger.error("Fallback de thumbnail também falhou: %s", te)
 
 
 # ----------- rotas WEB -----------
@@ -129,7 +171,6 @@ def add_submit(
     if not url:
         raise HTTPException(400, "URL é obrigatória")
 
-    # Já existe?
     existing = db.scalar(select(Listing).where(Listing.url == url))
     if existing:
         return RedirectResponse(f"/listing/{existing.id}", status_code=303)
@@ -169,13 +210,12 @@ def add_submit(
     db.commit()
     db.refresh(listing)
 
-    # Baixa as mídias
     dest = downloader.listing_dir(listing.id, listing.ml_id)
     pics = data.get("pictures", [])
     vids = data.get("videos", [])
 
+    # ── Imagens ───────────────────────────────────────────────────────────────
     for idx, pic_url in enumerate(pics, start=1):
-        # Ignora placeholders de lazy-load (GIF/SVG 1×1 sem valor real)
         if downloader.is_placeholder(pic_url):
             logger.info("Placeholder ignorado na posição %d: %s…", idx, pic_url[:60])
             continue
@@ -195,24 +235,17 @@ def add_submit(
             media.download_error = str(e)
         db.add(media)
 
+    # ── Vídeos ────────────────────────────────────────────────────────────────
     for idx, v in enumerate(vids, start=len(pics) + 1):
-        mtype = v.get("type", "native")
-        m = Media(
-            listing_id=listing.id, type=mtype if mtype == "youtube" else "video",
-            source_url=v["url"], position=idx,
+        mtype = v.get("type", "video")
+        media = Media(
+            listing_id=listing.id,
+            type=mtype if mtype == "youtube" else "video",
+            source_url=v["url"],
+            position=idx,
         )
-        if mtype == "youtube" and v.get("id"):
-            try:
-                meta = downloader.download_youtube_thumbnail(v["id"], dest, idx)
-                if meta:
-                    m.local_path = meta["local_path"]
-                    m.file_size = meta["file_size"]
-                    m.width = meta["width"]
-                    m.height = meta["height"]
-                    m.downloaded_at = datetime.utcnow()
-            except Exception as e:
-                m.download_error = str(e)
-        db.add(m)
+        _download_video_with_fallback(v, dest, idx, media)
+        db.add(media)
 
     db.commit()
     return RedirectResponse(f"/listing/{listing.id}", status_code=303)
@@ -317,7 +350,7 @@ def stores_add(name: str = Form(...), seller_nickname: str | None = Form(None), 
     return RedirectResponse("/stores", status_code=303)
 
 
-# ----------- API JSON (para automações futuras) -----------
+# ----------- API JSON -----------
 
 @app.get("/api/listings")
 def api_listings(db: Session = Depends(get_db)):

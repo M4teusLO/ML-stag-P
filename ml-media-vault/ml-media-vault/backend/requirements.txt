@@ -11,3 +11,4 @@ pillow==10.4.0
 pydantic==2.9.2
 python-slugify==8.0.4
 playwright==1.47.0
+yt-dlp==2024.11.18

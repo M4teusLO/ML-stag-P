@@ -3,16 +3,17 @@ FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 WORKDIR /app
 
-# Dependências do sistema extras (libjpeg pro Pillow)
+# Dependências do sistema: libjpeg pro Pillow + ffmpeg pro yt-dlp
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg-dev \
     zlib1g-dev \
+    ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Garante que os browsers do Playwright estão presentes (já vêm na imagem, mas reforçamos)
+# Garante que os browsers do Playwright estão presentes
 RUN playwright install chromium
 
 COPY app ./app

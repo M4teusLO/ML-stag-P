@@ -1,22 +1,16 @@
 """
 Scraper baseado em navegador headless (Playwright + Chromium).
 
-Usado como fallback quando a API oficial não atende — por exemplo:
-- URLs de catálogo universal (MLBU) sem item específico no link
-- Itens privados, pausados, ou de regiões fora do escopo da API
-- Quando o usuário quer "ver pelos olhos do navegador"
-
 Estratégia:
 1. Abre a página com Chromium headless (User-Agent realista)
-2. Espera a rede aquietar (todo JS carregado)
+2. Intercepta respostas de rede para capturar imagens E vídeos (mp4/m3u8)
 3. Dispensa banner de cookies/privacy
 4. Scrolla a galeria e clica nas miniaturas para forçar lazy-load
-5. Captura TODAS as URLs de imagens via:
-   a. Hook nas respostas de rede (mlstatic.com)
-   b. Varredura do DOM final (img.src, data-zoom, srcset)
-6. Captura também iframes do YouTube
-
-A função expõe `scrape(url)` com o mesmo contrato do scraper principal.
+5. Captura imagens via DOM (img.src, data-zoom, srcset)
+6. Captura vídeos via:
+   a. iframes do YouTube
+   b. Elementos <video> no DOM (src + <source>)
+   c. URLs de vídeo interceptadas na rede (mlstatic.com mp4/m3u8)
 """
 import os
 import re
@@ -25,6 +19,9 @@ import logging
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 logger = logging.getLogger(__name__)
+
+# Extensões/padrões que indicam conteúdo de vídeo
+_VIDEO_URL_RE = re.compile(r"\.(mp4|webm|m3u8|mov)(\?|$)", re.IGNORECASE)
 
 
 def _user_agent() -> str:
@@ -52,8 +49,14 @@ def _is_product_image_url(url: str) -> bool:
         return False
     if "mlstatic.com" not in url:
         return False
-    # Aceita só URLs que parecem foto de produto (CDN tem padrões D_NQ, D_W etc.)
     return any(token in url for token in ("D_NQ_", "D_W_", "D_Q_"))
+
+
+def _is_video_url(url: str) -> bool:
+    """Retorna True se a URL parecer um arquivo de vídeo."""
+    if not isinstance(url, str) or not url.startswith("http"):
+        return False
+    return bool(_VIDEO_URL_RE.search(url))
 
 
 def scrape(url: str, timeout_ms: int = 40000) -> dict:
@@ -63,7 +66,8 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
         "pictures": [], "videos": [], "attributes": {}, "raw": None,
     }
 
-    captured_urls: list[str] = []
+    captured_image_urls: list[str] = []
+    captured_video_urls: list[str] = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -82,16 +86,21 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
             )
             page = context.new_page()
 
+            # ── Intercepta respostas de rede ──────────────────────────────────
             def _on_response(resp):
                 try:
-                    if _is_product_image_url(resp.url) and resp.url not in captured_urls:
-                        captured_urls.append(resp.url)
+                    ru = resp.url
+                    if _is_product_image_url(ru) and ru not in captured_image_urls:
+                        captured_image_urls.append(ru)
+                    elif _is_video_url(ru) and ru not in captured_video_urls:
+                        captured_video_urls.append(ru)
+                        logger.info("Vídeo capturado na rede: %s", ru[:120])
                 except Exception:
                     pass
 
             page.on("response", _on_response)
 
-            # 1) Navega
+            # ── Navega ────────────────────────────────────────────────────────
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             except PWTimeout:
@@ -102,7 +111,7 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
             except PWTimeout:
                 pass
 
-            # 2) Dispensa banners (cookies, privacidade, login flutuante)
+            # ── Dispensa banners ──────────────────────────────────────────────
             for selector in (
                 'button[data-testid="action:understood-button"]',
                 'button:has-text("Entendi")',
@@ -118,7 +127,7 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
                 except Exception:
                     pass
 
-            # 3) Scroll progressivo para disparar lazy-load
+            # ── Scroll progressivo para lazy-load ─────────────────────────────
             try:
                 page.evaluate("""
                     () => new Promise(r => {
@@ -139,7 +148,7 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
             except Exception:
                 pass
 
-            # 4) Percorre a galeria — clica em cada miniatura para forçar a foto principal a trocar
+            # ── Clica nas miniaturas da galeria ───────────────────────────────
             thumb_selectors = (
                 ".ui-pdp-thumbnail",
                 ".ui-pdp-gallery__column figure",
@@ -150,7 +159,7 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
                     thumbs = page.locator(sel).all()
                     if not thumbs:
                         continue
-                    logger.info("Galeria: %d miniaturas encontradas via %s", len(thumbs), sel)
+                    logger.info("Galeria: %d miniaturas via %s", len(thumbs), sel)
                     for thumb in thumbs[:40]:
                         try:
                             thumb.scroll_into_view_if_needed(timeout=800)
@@ -162,14 +171,16 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
                 except Exception:
                     continue
 
-            # 5) Extrai URLs do DOM final
+            # Aguarda um pouco após clicar para requisições de vídeo dispararem
+            page.wait_for_timeout(1500)
+
+            # ── Extrai imagens do DOM ─────────────────────────────────────────
             try:
-                dom_urls: list[str] = page.evaluate("""
+                dom_image_urls: list[str] = page.evaluate("""
                     () => {
                         const out = new Set();
                         const push = (u) => {
-                            if (!u) return;
-                            if (u.startsWith('data:')) return;
+                            if (!u || u.startsWith('data:')) return;
                             if (!u.includes('mlstatic.com')) return;
                             out.add(u);
                         };
@@ -184,23 +195,68 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
                     }
                 """) or []
             except Exception as e:
-                logger.error("Falha ao avaliar JS: %s", e)
-                dom_urls = []
+                logger.error("Falha ao avaliar JS (imagens): %s", e)
+                dom_image_urls = []
 
-            # 6) Combina (DOM tem prioridade), dedup
-            seen: set[str] = set()
-            for u in dom_urls + captured_urls:
+            # ── Extrai vídeos do DOM (<video> + <source>) ─────────────────────
+            try:
+                dom_video_urls: list[str] = page.evaluate("""
+                    () => {
+                        const out = new Set();
+                        document.querySelectorAll('video').forEach(v => {
+                            if (v.src && v.src.startsWith('http')) out.add(v.src);
+                            v.querySelectorAll('source').forEach(s => {
+                                if (s.src && s.src.startsWith('http')) out.add(s.src);
+                            });
+                        });
+                        return [...out];
+                    }
+                """) or []
+            except Exception as e:
+                logger.error("Falha ao avaliar JS (vídeos DOM): %s", e)
+                dom_video_urls = []
+
+            # ── Combina imagens (DOM tem prioridade), dedup ───────────────────
+            seen_images: set[str] = set()
+            for u in dom_image_urls + captured_image_urls:
                 if not _is_product_image_url(u):
                     continue
                 up = _upgrade_image_url(u)
-                if up in seen:
+                if up in seen_images:
                     continue
-                seen.add(up)
+                seen_images.add(up)
                 result["pictures"].append(up)
 
-            logger.info("Browser scraper: %d imagens capturadas", len(result["pictures"]))
+            logger.info("Browser scraper: %d imagens", len(result["pictures"]))
 
-            # 7) Título
+            # ── Combina vídeos nativos, dedup ─────────────────────────────────
+            seen_videos: set[str] = set()
+            for vu in dom_video_urls + captured_video_urls:
+                if vu in seen_videos:
+                    continue
+                seen_videos.add(vu)
+                result["videos"].append({"type": "video", "url": vu})
+                logger.info("Vídeo nativo encontrado: %s", vu[:120])
+
+            # ── Vídeos YouTube via iframes ────────────────────────────────────
+            try:
+                for iframe in page.locator('iframe[src*="youtube"]').all():
+                    src = iframe.get_attribute("src") or ""
+                    m = re.search(r"(?:embed/|v=|youtu\.be/)([A-Za-z0-9_-]{11})", src)
+                    if m:
+                        yid = m.group(1)
+                        entry = {
+                            "type": "youtube",
+                            "url": f"https://www.youtube.com/watch?v={yid}",
+                            "id": yid,
+                        }
+                        if entry not in result["videos"]:
+                            result["videos"].append(entry)
+                            logger.info("YouTube encontrado via iframe: %s", yid)
+            except Exception:
+                pass
+
+            # ── Título ────────────────────────────────────────────────────────
             for sel in ("h1.ui-pdp-title", "h1"):
                 try:
                     t = page.locator(sel).first.text_content(timeout=2000)
@@ -210,7 +266,7 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
                 except Exception:
                     continue
 
-            # 8) Preço
+            # ── Preço ─────────────────────────────────────────────────────────
             try:
                 price_text = page.locator(".andes-money-amount__fraction").first.text_content(timeout=2000)
                 if price_text:
@@ -222,24 +278,11 @@ def scrape(url: str, timeout_ms: int = 40000) -> dict:
             except Exception:
                 pass
 
-            # 9) Descrição
+            # ── Descrição ─────────────────────────────────────────────────────
             try:
                 desc = page.locator(".ui-pdp-description__content").first.text_content(timeout=2000)
                 if desc:
                     result["description"] = desc.strip()[:5000]
-            except Exception:
-                pass
-
-            # 10) Vídeos YouTube via iframes
-            try:
-                for iframe in page.locator('iframe[src*="youtube"]').all():
-                    src = iframe.get_attribute("src") or ""
-                    m = re.search(r"(?:embed/|v=|youtu\.be/)([A-Za-z0-9_-]{11})", src)
-                    if m:
-                        yid = m.group(1)
-                        entry = {"type": "youtube", "url": f"https://www.youtube.com/watch?v={yid}", "id": yid}
-                        if entry not in result["videos"]:
-                            result["videos"].append(entry)
             except Exception:
                 pass
 
