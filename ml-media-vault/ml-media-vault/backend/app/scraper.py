@@ -48,6 +48,25 @@ PROPS_REGEX = re.compile(
     r"window\.__PROPS__\s*=\s*JSON\.parse\((['\"])(.+?)\1\)", re.DOTALL,
 )
 
+# Prefixos de URLs que são placeholders de lazy-load — nunca devem entrar na lista de mídias
+_SKIP_URL_PREFIXES = (
+    "data:image/gif;base64,R0lGODlhAQABAI",
+    "data:image/gif;base64,R0lGODlhAQABAIA",
+    "data:image/svg+xml",
+    "data:",  # qualquer outro data: URL não vindo de base64 real
+)
+
+
+def _is_valid_picture_url(url: str) -> bool:
+    """Retorna True apenas para URLs HTTP(S) reais de imagens de produto."""
+    if not isinstance(url, str):
+        return False
+    if url.startswith(_SKIP_URL_PREFIXES):
+        return False
+    if not url.startswith(("http://", "https://")):
+        return False
+    return True
+
 
 def _user_agent() -> str:
     import os
@@ -84,6 +103,8 @@ def _upgrade_image_url(url: str) -> str:
     Padrão: .../D_NQ_NP_2X_<code>-<suffix>.webp  ou .../D_NQ_NP_<code>-<suffix>.webp
     Vamos forçar o sufixo '-F' (full) e o prefixo '2X_'.
     """
+    if not _is_valid_picture_url(url):
+        return url
     if "mlstatic.com" not in url:
         return url
 
@@ -105,7 +126,8 @@ def _walk_for_pictures(obj: Any, found_urls: list[str]) -> None:
             for pic in obj["pictures"]:
                 if isinstance(pic, dict):
                     u = pic.get("secure_url") or pic.get("url") or pic.get("src")
-                    if u and "mlstatic.com" in u and u not in found_urls:
+                    # Filtra placeholders e URLs não-HTTP antes de adicionar
+                    if u and _is_valid_picture_url(u) and "mlstatic.com" in u and u not in found_urls:
                         found_urls.append(u)
         for v in obj.values():
             _walk_for_pictures(v, found_urls)
@@ -189,18 +211,18 @@ def _parse_html_fallback(soup: BeautifulSoup) -> dict:
     if h1:
         title = h1.get_text(strip=True)
 
-    # Imagens da galeria
+    # Imagens da galeria — filtra placeholders e data: URLs
     pictures: list[str] = []
     for img in soup.select("figure.ui-pdp-gallery__figure img, img.ui-pdp-image"):
         src = img.get("data-zoom") or img.get("data-src") or img.get("src")
-        if src and "mlstatic.com" in src and src not in pictures:
+        if src and _is_valid_picture_url(src) and "mlstatic.com" in src and src not in pictures:
             pictures.append(src)
 
     # Open Graph como último recurso
     if not pictures:
         for meta in soup.select('meta[property="og:image"]'):
             content = meta.get("content")
-            if content and content not in pictures:
+            if content and _is_valid_picture_url(content) and content not in pictures:
                 pictures.append(content)
 
     # Preço
@@ -251,7 +273,7 @@ def scrape(url: str) -> dict:
         result["raw"] = state
         pics: list[str] = []
         _walk_for_pictures(state, pics)
-        result["pictures"] = [_upgrade_image_url(u) for u in pics]
+        result["pictures"] = [_upgrade_image_url(u) for u in pics if _is_valid_picture_url(u)]
 
         vids: list[dict] = []
         _walk_for_videos(state, vids)
@@ -291,10 +313,10 @@ def scrape(url: str) -> dict:
             result["title"] = result["title"] or ld.get("name")
             if not result["pictures"]:
                 imgs = ld.get("image")
-                if isinstance(imgs, str):
+                if isinstance(imgs, str) and _is_valid_picture_url(imgs):
                     result["pictures"] = [imgs]
                 elif isinstance(imgs, list):
-                    result["pictures"] = imgs
+                    result["pictures"] = [u for u in imgs if _is_valid_picture_url(u)]
             if not result["price"]:
                 offers = ld.get("offers")
                 if isinstance(offers, dict):
@@ -310,7 +332,7 @@ def scrape(url: str) -> dict:
         fb = _parse_html_fallback(soup)
         result["title"] = result["title"] or fb["title"]
         if not result["pictures"]:
-            result["pictures"] = [_upgrade_image_url(u) for u in fb["pictures"]]
+            result["pictures"] = [_upgrade_image_url(u) for u in fb["pictures"] if _is_valid_picture_url(u)]
         if not result["price"]:
             result["price"] = fb["price"]
 
@@ -329,11 +351,11 @@ def scrape(url: str) -> dict:
     if desc_el:
         result["description"] = desc_el.get_text("\n", strip=True)
 
-    # Dedup imagens
-    seen = set()
-    deduped = []
+    # Dedup imagens — garantia final de que nenhum data: URL escapou
+    seen: set[str] = set()
+    deduped: list[str] = []
     for u in result["pictures"]:
-        if u not in seen:
+        if _is_valid_picture_url(u) and u not in seen:
             seen.add(u)
             deduped.append(u)
     result["pictures"] = deduped

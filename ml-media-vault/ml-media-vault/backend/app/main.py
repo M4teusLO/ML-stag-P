@@ -175,6 +175,11 @@ def add_submit(
     vids = data.get("videos", [])
 
     for idx, pic_url in enumerate(pics, start=1):
+        # Ignora placeholders de lazy-load (GIF/SVG 1×1 sem valor real)
+        if downloader.is_placeholder(pic_url):
+            logger.info("Placeholder ignorado na posição %d: %s…", idx, pic_url[:60])
+            continue
+
         media = Media(
             listing_id=listing.id, type="image", source_url=pic_url, position=idx,
         )
@@ -186,7 +191,7 @@ def add_submit(
             media.height = meta["height"]
             media.downloaded_at = datetime.utcnow()
         except Exception as e:
-            logger.exception("Falha ao baixar imagem %s", pic_url)
+            logger.error("Falha ao baixar imagem %s — %s", pic_url[:80], e)
             media.download_error = str(e)
         db.add(media)
 

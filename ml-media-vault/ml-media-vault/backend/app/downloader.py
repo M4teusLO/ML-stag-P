@@ -1,5 +1,7 @@
 """Baixa imagens e vídeos para a pasta de mídias e devolve o caminho local + metadados."""
+import base64
 import os
+import re
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -12,6 +14,18 @@ from slugify import slugify
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/data/media"))
+
+# GIF 1×1 transparente e outros placeholders comuns do ML (lazy-load)
+_PLACEHOLDER_PREFIXES = (
+    "data:image/gif;base64,R0lGODlhAQABAI",  # GIF 1×1 transparente
+    "data:image/gif;base64,R0lGODlhAQABAIA",
+    "data:image/svg+xml",                      # SVG placeholder genérico
+)
+
+
+def is_placeholder(url: str) -> bool:
+    """Retorna True se a URL for um placeholder de lazy-load sem valor real."""
+    return url.startswith(_PLACEHOLDER_PREFIXES)
 
 
 def _safe_filename(url: str, fallback_idx: int) -> str:
@@ -43,8 +57,56 @@ def _ensure_extension(filename: str, content_type: str | None) -> str:
     return filename + mapping.get(ct, ".bin")
 
 
+def _handle_data_url(url: str, dest_dir: Path, index: int) -> dict:
+    """
+    Decodifica e salva imagens embutidas em data: URLs (base64).
+    Formato esperado: data:[<mime>][;base64],<dados>
+    """
+    match = re.match(r"data:(?P<mime>[^;,]+)(?:;base64)?,(?P<data>.+)", url, re.DOTALL)
+    if not match:
+        raise ValueError(f"data: URL inválida ou não suportada: {url[:80]}")
+
+    mime = match.group("mime").strip().lower()
+    raw = base64.b64decode(match.group("data"))
+
+    ext_map = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    ext = ext_map.get(mime, ".bin")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    full_path = dest_dir / f"{index:03d}_inline{ext}"
+    full_path.write_bytes(raw)
+
+    width = height = None
+    try:
+        with Image.open(full_path) as img:
+            width, height = img.size
+    except Exception as e:
+        logger.warning("Pillow não conseguiu abrir %s: %s", full_path, e)
+
+    return {
+        "local_path": str(full_path.relative_to(MEDIA_DIR)),
+        "file_size": len(raw),
+        "width": width,
+        "height": height,
+    }
+
+
 def download_image(url: str, dest_dir: Path, index: int) -> dict:
     """Baixa uma imagem e retorna metadados (path, size, dimensões)."""
+
+    # Rejeita placeholders de lazy-load antes de qualquer I/O
+    if is_placeholder(url):
+        raise ValueError(f"URL é um placeholder de lazy-load, ignorado: {url[:80]}")
+
+    # Trata imagens base64 embutidas (data: URLs reais)
+    if url.startswith("data:"):
+        logger.info("data: URL detectada no índice %d — decodificando localmente.", index)
+        return _handle_data_url(url, dest_dir, index)
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     headers = {
         "User-Agent": os.getenv(
