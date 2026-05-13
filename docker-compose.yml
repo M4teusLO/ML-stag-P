@@ -29,8 +29,8 @@ services:
       MEDIA_DIR: /data/media
       USER_AGENT: ${USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36}
     volumes:
-      - ./data:/data           # mídias ficam no seu disco, fora do container
-      - ./backend/app:/app/app # hot-reload dos arquivos da aplicação
+      - ./data/media:/data/media   # mídias ficam no seu disco, fora do container
+      - ./backend/app:/app/app     # hot-reload dos arquivos da aplicação
     ports:
       - "8080:8000"
     depends_on:
