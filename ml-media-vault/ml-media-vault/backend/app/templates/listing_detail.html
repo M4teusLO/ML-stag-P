@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{{ listing.title or listing.ml_id }}{% endblock %}
+{% block content %}
+
+<nav class="breadcrumb"><a href="/">← voltar ao acervo</a></nav>
+
+<section class="page-head">
+    <h1>{{ listing.title or 'Sem título' }}</h1>
+    <div class="meta">
+        {% if listing.ml_id %}<code>{{ listing.ml_id }}</code>{% endif %}
+        {% if listing.store %}<span class="tag">{{ listing.store.name }}</span>{% endif %}
+        {% if listing.price %}<span class="tag tag-alt">R$ {{ '%.2f'|format(listing.price) }}</span>{% endif %}
+        <a href="{{ listing.url }}" target="_blank" rel="noopener" class="link-out">abrir anúncio ↗</a>
+    </div>
+</section>
+
+<section class="actions-bar">
+    <a href="/listing/{{ listing.id }}/download" class="btn-primary">⬇ Baixar todas as mídias (.zip)</a>
+    <form method="post" action="/listing/{{ listing.id }}/delete" onsubmit="return confirm('Excluir esse anúncio e suas mídias do banco? (Os arquivos no disco permanecem)');">
+        <button type="submit" class="btn-danger">Excluir do banco</button>
+    </form>
+</section>
+
+{% if listing.media %}
+<section class="gallery">
+    <h2>Mídias ({{ listing.media|length }})</h2>
+    <div class="gallery-grid">
+        {% for m in listing.media %}
+        <div class="gallery-item">
+            {% if m.local_path and m.type in ('image', 'youtube') %}
+                <a href="/media/{{ m.local_path }}" target="_blank">
+                    <img src="/media/{{ m.local_path }}" alt="" loading="lazy">
+                </a>
+            {% elif m.type == 'youtube' %}
+                <a href="{{ m.source_url }}" target="_blank" class="play-link">▶ YouTube</a>
+            {% else %}
+                <a href="{{ m.source_url }}" target="_blank" class="play-link">▶ Vídeo</a>
+            {% endif %}
+            <div class="gallery-meta">
+                <span class="type-badge type-{{ m.type }}">{{ m.type }}</span>
+                {% if m.width and m.height %}<span>{{ m.width }}×{{ m.height }}</span>{% endif %}
+                {% if m.file_size %}<span>{{ (m.file_size / 1024)|round|int }} KB</span>{% endif %}
+                {% if m.download_error %}<span class="err" title="{{ m.download_error }}">⚠ erro</span>{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+{% else %}
+<div class="empty"><p>Nenhuma mídia coletada para este anúncio.</p></div>
+{% endif %}
+
+<section class="edit-panel">
+    <h2>Metadados</h2>
+    <form method="post" action="/listing/{{ listing.id }}/update" class="form-edit">
+        <div class="grid-3">
+            <label>Time
+                <input name="team" value="{{ listing.team or '' }}">
+            </label>
+            <label>Temporada
+                <input name="season" value="{{ listing.season or '' }}">
+            </label>
+            <label>Modelo
+                <select name="kit_type">
+                    <option value="">—</option>
+                    {% for v, lbl in [('home','Casa'),('away','Fora'),('third','Terceira'),('gk','Goleiro'),('retro','Retrô'),('training','Treino')] %}
+                        <option value="{{ v }}" {% if listing.kit_type == v %}selected{% endif %}>{{ lbl }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+        <div class="grid-3">
+            <label>Marca
+                <input name="brand" value="{{ listing.brand or '' }}">
+            </label>
+            <label>Jogador
+                <input name="player_name" value="{{ listing.player_name or '' }}">
+            </label>
+            <label>Número
+                <input name="player_number" value="{{ listing.player_number or '' }}">
+            </label>
+        </div>
+        <div class="grid-2">
+            <label>Tamanhos
+                <input name="sizes" value="{{ listing.sizes or '' }}">
+            </label>
+            <label>Loja
+                <select name="store_id">
+                    <option value="">—</option>
+                    {% for s in stores %}
+                        <option value="{{ s.id }}" {% if listing.store_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+        </div>
+        <label>Tags
+            <input name="tags" value="{{ listing.tags or '' }}">
+        </label>
+        <button type="submit" class="btn-primary">Salvar metadados</button>
+    </form>
+</section>
+
+{% if listing.description %}
+<section class="description">
+    <h2>Descrição original do anúncio</h2>
+    <pre>{{ listing.description }}</pre>
+</section>
+{% endif %}
+
+{% endblock %}

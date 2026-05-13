@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ML Media Vault{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+    <header class="topbar">
+        <div class="container">
+            <a href="/" class="brand">
+                <span class="brand-mark">⚽</span>
+                <span class="brand-text">Media Vault</span>
+            </a>
+            <nav>
+                <a href="/" {% if request.url.path == '/' %}class="active"{% endif %}>Acervo</a>
+                <a href="/add" {% if request.url.path == '/add' %}class="active"{% endif %}>+ Novo anúncio</a>
+                <a href="/stores" {% if request.url.path == '/stores' %}class="active"{% endif %}>Lojas</a>
+                <a href="/docs" target="_blank">API</a>
+            </nav>
+        </div>
+    </header>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer>
+        <div class="container">
+            <small>ML Media Vault • rodando localmente • dados em PostgreSQL • mídias em <code>./data/media</code></small>
+        </div>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Adicionar anúncio{% endblock %}
+{% block content %}
+
+<section class="page-head">
+    <h1>Adicionar anúncio</h1>
+    <p class="muted">Cole o link do anúncio. Coletamos automaticamente as fotos e o vídeo. Os metadados são opcionais e podem ser preenchidos depois.</p>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/add" class="form-add">
+    <label>URL do anúncio
+        <input type="url" name="url" required placeholder="https://produto.mercadolivre.com.br/MLB-..." autofocus>
+    </label>
+
+    <fieldset>
+        <legend>Identificação (opcional)</legend>
+        <div class="grid-2">
+            <label>Loja
+                <input list="store-list" name="store_name" placeholder="Ex: FutebolStore Oficial">
+                <datalist id="store-list">
+                    {% for s in stores %}<option value="{{ s.name }}">{% endfor %}
+                </datalist>
+            </label>
+            <label>Marca
+                <input name="brand" placeholder="Nike, Adidas, Puma…">
+            </label>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Detalhes da camisa</legend>
+        <div class="grid-3">
+            <label>Time
+                <input name="team" placeholder="Flamengo, Real Madrid…">
+            </label>
+            <label>Temporada
+                <input name="season" placeholder="2024/25">
+            </label>
+            <label>Modelo
+                <select name="kit_type">
+                    <option value="">—</option>
+                    <option value="home">Casa</option>
+                    <option value="away">Fora</option>
+                    <option value="third">Terceira</option>
+                    <option value="gk">Goleiro</option>
+                    <option value="retro">Retrô</option>
+                    <option value="training">Treino</option>
+                </select>
+            </label>
+        </div>
+        <div class="grid-3">
+            <label>Nome do jogador
+                <input name="player_name" placeholder="Opcional">
+            </label>
+            <label>Número
+                <input name="player_number" placeholder="10">
+            </label>
+            <label>Tamanhos disponíveis
+                <input name="sizes" placeholder="P, M, G, GG">
+            </label>
+        </div>
+        <label>Tags livres
+            <input name="tags" placeholder="palavras-chave separadas por vírgula">
+        </label>
+    </fieldset>
+
+    <div class="form-actions">
+        <button type="submit" class="btn-primary">Coletar e salvar</button>
+        <a href="/" class="link-clear">cancelar</a>
+    </div>
+    <p class="muted small">Dica: a coleta pode levar alguns segundos. Você é redirecionado para a página do anúncio assim que finalizar.</p>
+</form>
+
+{% endblock %}

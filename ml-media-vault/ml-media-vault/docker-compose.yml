@@ -1,0 +1,42 @@
+# ML Media Vault - Cofre de mídias dos anúncios do Mercado Livre
+# Sobe tudo com:  docker compose up -d
+# Acesse em:      http://localhost:8080
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mlvault-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlvault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlvault_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-mlvault}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # exposto em 5433 pra não bater com Postgres local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mlvault}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build: ./backend
+    container_name: mlvault-app
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-mlvault}:${POSTGRES_PASSWORD:-mlvault_pass}@db:5432/${POSTGRES_DB:-mlvault}
+      MEDIA_DIR: /data/media
+      USER_AGENT: ${USER_AGENT:-Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36}
+    volumes:
+      - ./data:/data           # mídias ficam no seu disco, fora do container
+      - ./backend/app:/app/app # hot-reload dos arquivos da aplicação
+    ports:
+      - "8080:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

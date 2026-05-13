@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Lojas{% endblock %}
+{% block content %}
+
+<section class="page-head">
+    <h1>Lojas / contas</h1>
+    <p class="muted">Use as lojas para saber de onde veio cada anúncio.</p>
+</section>
+
+<form method="post" action="/stores/add" class="form-inline">
+    <input name="name" placeholder="Nome da loja" required>
+    <input name="seller_nickname" placeholder="Nickname do vendedor no ML (opcional)">
+    <input name="notes" placeholder="Observação (opcional)">
+    <button type="submit" class="btn-primary">+ Cadastrar</button>
+</form>
+
+{% if stores %}
+<table class="store-list">
+    <thead>
+        <tr><th>Loja</th><th>Vendedor (ML)</th><th>Observações</th><th>Anúncios</th></tr>
+    </thead>
+    <tbody>
+        {% for s in stores %}
+        <tr>
+            <td><strong>{{ s.name }}</strong></td>
+            <td>{% if s.seller_nickname %}<code>{{ s.seller_nickname }}</code>{% else %}—{% endif %}</td>
+            <td class="muted">{{ s.notes or '' }}</td>
+            <td>{{ counts.get(s.id, 0) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="muted">Nenhuma loja cadastrada ainda.</p>
+{% endif %}
+
+{% endblock %}

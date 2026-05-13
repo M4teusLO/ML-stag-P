@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Acervo • ML Media Vault{% endblock %}
+{% block content %}
+
+<section class="hero">
+    <div>
+        <h1>Seu acervo de mídias</h1>
+        <p class="muted">Tudo que foi coletado, em um lugar só.</p>
+    </div>
+    <div class="stats">
+        <div><strong>{{ totals.listings }}</strong><span>anúncios</span></div>
+        <div><strong>{{ totals.media }}</strong><span>mídias</span></div>
+        <div><strong>{{ totals.stores }}</strong><span>lojas</span></div>
+    </div>
+</section>
+
+<form class="filters" method="get" action="/">
+    <input type="search" name="q" placeholder="Buscar título, jogador, tag…" value="{{ q }}">
+
+    <select name="team">
+        <option value="">Time (todos)</option>
+        {% for t in teams %}<option value="{{ t }}" {% if filters.team == t %}selected{% endif %}>{{ t }}</option>{% endfor %}
+    </select>
+
+    <select name="season">
+        <option value="">Temporada</option>
+        {% for s in seasons %}<option value="{{ s }}" {% if filters.season == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+
+    <select name="kit">
+        <option value="">Modelo</option>
+        <option value="home" {% if filters.kit == 'home' %}selected{% endif %}>Casa</option>
+        <option value="away" {% if filters.kit == 'away' %}selected{% endif %}>Fora</option>
+        <option value="third" {% if filters.kit == 'third' %}selected{% endif %}>Terceira</option>
+        <option value="gk" {% if filters.kit == 'gk' %}selected{% endif %}>Goleiro</option>
+        <option value="retro" {% if filters.kit == 'retro' %}selected{% endif %}>Retrô</option>
+        <option value="training" {% if filters.kit == 'training' %}selected{% endif %}>Treino</option>
+    </select>
+
+    <select name="store_id">
+        <option value="">Loja</option>
+        {% for s in stores %}<option value="{{ s.id }}" {% if filters.store_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+    </select>
+
+    <button type="submit">Filtrar</button>
+    <a href="/" class="link-clear">limpar</a>
+</form>
+
+{% if not listings %}
+    <div class="empty">
+        <h2>Acervo vazio</h2>
+        <p>Comece adicionando o link de um dos seus anúncios.</p>
+        <a href="/add" class="btn-primary">+ Adicionar primeiro anúncio</a>
+    </div>
+{% else %}
+<div class="grid">
+    {% for l in listings %}
+        <a href="/listing/{{ l.id }}" class="card">
+            <div class="card-img">
+                {% set thumb = none %}
+                {% for m in l.media %}{% if m.local_path and not thumb %}{% set thumb = m.local_path %}{% endif %}{% endfor %}
+                {% if thumb %}
+                    <img src="/media/{{ thumb }}" alt="{{ l.title or l.ml_id }}" loading="lazy">
+                {% else %}
+                    <div class="no-img">sem mídia</div>
+                {% endif %}
+                <span class="badge-count">{{ l.media|length }} {{ 'mídia' if l.media|length == 1 else 'mídias' }}</span>
+            </div>
+            <div class="card-body">
+                <h3>{{ l.title or l.ml_id or 'Sem título' }}</h3>
+                <div class="meta">
+                    {% if l.team %}<span class="tag">{{ l.team }}</span>{% endif %}
+                    {% if l.season %}<span class="tag tag-alt">{{ l.season }}</span>{% endif %}
+                    {% if l.kit_type %}<span class="tag tag-alt">{{ l.kit_type }}</span>{% endif %}
+                </div>
+                <div class="meta-small">
+                    {% if l.store %}<span>{{ l.store.name }}</span>{% endif %}
+                    {% if l.ml_id %}<code>{{ l.ml_id }}</code>{% endif %}
+                </div>
+            </div>
+        </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
